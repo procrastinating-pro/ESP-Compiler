@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ==============================================================================
-# SOVEREIGN IDE & HYDROPONICS SMART CONTROLLER - MASTER INSTALLER (v4.0)
+# SOVEREIGN IDE & HYDROPONICS SMART CONTROLLER - MASTER INSTALLER (v5.0)
 # ==============================================================================
 
 BASE_DIR="$HOME/local-esp-ide"
@@ -10,13 +10,34 @@ BACKEND_DIR="$BASE_DIR/backend"
 FRONTEND_DIR="$BASE_DIR/frontend"
 
 echo "=================================================="
-echo " Inicjalizacja Pełnej Automatyki z Auto-Flashem "
+echo " Inicjalizacja Pełnej Automatyki + Weryfikacja ESP"
 echo "=================================================="
 
+# 0. WERYFIKACJA I INSTALACJA ESP-IDF
+if [ ! -d "$HOME/esp/esp-idf" ]; then
+    echo "[!] Nie wykryto środowiska ESP-IDF w $HOME/esp/esp-idf."
+    echo "[*] Rozpoczynam instalację zależności systemowych (może poprosić o hasło sudo)..."
+    sudo apt-get update
+    sudo apt-get install -y git wget flex bison gperf python3 python3-pip python3-venv cmake ninja-build ccache libffi-dev libssl-dev dfu-util libusb-1.0-0
+
+    echo "[*] Klonowanie repozytorium ESP-IDF..."
+    mkdir -p "$HOME/esp"
+    cd "$HOME/esp"
+    git clone --recursive https://github.com/espressif/esp-idf.git
+
+    echo "[*] Instalacja narzędzi (Toolchain) dla układów ESP32 oraz ESP32-S3..."
+    cd esp-idf
+    ./install.sh esp32s3,esp32
+    echo "[+] Instalacja ESP-IDF zakończona!"
+else
+    echo "[+] Środowisko ESP-IDF zostało wykryte. Przechodzę dalej..."
+fi
+
+# 1. STRUKTURA KATALOGÓW
 rm -rf "$BASE_DIR"
 mkdir -p "$BACKEND_DIR" "$FRONTEND_DIR" "$WORK_DIR/main"
 
-# 1. PLIKI PROJEKTOWE
+# 2. PLIKI PROJEKTOWE
 cat << 'EOF' > "$WORK_DIR/CMakeLists.txt"
 cmake_minimum_required(VERSION 3.16)
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
@@ -32,7 +53,7 @@ dependencies:
   espressif/cjson: "*"
 EOF
 
-# 2. GŁÓWNY KOD W C (Odwrócona logika, Okna czasowe, Polska Strefa Czasowa)
+# 3. GŁÓWNY KOD W C (Logika Active-High, Okna czasowe, Strefa CET)
 cat << 'EOF' > "$WORK_DIR/main/main.c"
 #include <string.h>
 #include <sys/time.h>
@@ -47,20 +68,20 @@ cat << 'EOF' > "$WORK_DIR/main/main.c"
 
 static const char *TAG = "HYDRO_CORE";
 
-// Definicje sprzętowe dla przekaźników Active-Low
-#define RELAY_ON  0
-#define RELAY_OFF 1
+// Logika poprawna (Active-High)
+#define RELAY_ON  1 // Podanie 3.3V włącza przekaźnik
+#define RELAY_OFF 0 // Podanie 0V wyłącza przekaźnik
 
 typedef struct {
     int pin;
     int mode;          // 0 = Ręczny, 1 = Automatyka czasowa
-    int start_h;       // Godzina rozpoczęcia cyklu (0-23)
-    int end_h;         // Godzina zakończenia cyklu (0-23)
+    int start_h;       // Godzina rozpoczęcia (0-23)
+    int end_h;         // Godzina zakończenia (0-23)
     int time_on;       // Czas działania [sekundy]
     int time_off;      // Czas uśpienia [sekundy]
-    int manual_state;  // 0 = Włączony, 1 = Wyłączony
+    int manual_state;  // 1 = Włączony, 0 = Wyłączony
     uint32_t last_toggle_tick;
-    bool is_active;    // Wewnętrzna flaga stanu (true = pompa pracuje)
+    bool is_active;    // Flaga stanu (true = pompa pracuje)
 } ChannelConfig;
 
 const int PINS[16] = {4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 21};
@@ -78,7 +99,7 @@ void init_relay_gpio(int pin) {
     gpio_config(&io_conf);
 }
 
-// Zaktualizowany interfejs WWW dodający kontrolę przedziałów czasowych i odpowiednie nazewnictwo stanów
+// Zaktualizowany interfejs WWW (Odwrócone stany)
 const char* html_page = "<!DOCTYPE html><html lang='pl'><head><meta charset='UTF-8'>"
 "<title>Hydro-Sterownik S3</title>"
 "<style>body{background:#0a0a0c;color:#0f0;font-family:monospace;padding:20px;max-width:900px;margin:0 auto;}"
@@ -86,7 +107,7 @@ const char* html_page = "<!DOCTYPE html><html lang='pl'><head><meta charset='UTF
 "button{cursor:pointer;font-weight:bold;text-transform:uppercase;}button:hover{background:#0f0;color:#000;}"
 ".panel{border:1px solid #333;border-left:4px solid #0f0;padding:15px;margin-bottom:20px;background:#0d0d12;}"
 ".pin-info{color:#00d8ff;font-weight:bold;}.hide{display:none;}.grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;}</style></head><body>"
-"<h2>[SYS] HYDRO-STEROWNIK :: ACTIVE-LOW PRO</h2>"
+"<h2>[SYS] HYDRO-STEROWNIK :: BARE METAL PRO</h2>"
 "<div class='panel'><h3>1. Synchronizacja Zegara (Polska Strefa Czasowa)</h3>"
 "<input type='datetime-local' id='timeInput'><button onclick='syncTime()'>USTAW CZAS SYSTEMOWY</button></div>"
 "<div class='panel'><h3>2. Konfiguracja Sprzętowa</h3>"
@@ -121,8 +142,8 @@ const char* html_page = "<!DOCTYPE html><html lang='pl'><head><meta charset='UTF
 "<div><label>Pauza [OFF] (sekundy):</label><input type='number' id='off_${i}' value='30'></div></div></div>"
 "<div id='manual_box_${i}' class='hide'>"
 "<label>Wymuś fizyczny stan przekaźnika:</label><select id='state_${i}'>"
-"<option value='1'>WYŁĄCZONY (Stan HIGH / 3.3V)</option>"
-"<option value='0'>WŁĄCZONY (Stan LOW / 0V)</option></select></div></div>`;"
+"<option value='1'>WŁĄCZONY (Stan HIGH / 3.3V)</option>"
+"<option value='0'>WYŁĄCZONY (Stan LOW / 0V)</option></select></div></div>`;"
 "}c.innerHTML=h;document.getElementById('saveBtn').style.display='block';}"
 "function toggleMode(i){"
 "const m=document.getElementById(`mode_${i}`).value;"
@@ -184,7 +205,7 @@ static esp_err_t post_config_handler(httpd_req_t *req) {
                         
                         if (relays[i].mode == 0) {
                             gpio_set_level(relays[i].pin, relays[i].manual_state);
-                            ESP_LOGW(TAG, "[RĘCZNY] Kanał %d (GPIO %d) ustawiony na twardo. Napięcie: %s", i+1, relays[i].pin, relays[i].manual_state == RELAY_ON ? "0V (ON)" : "3.3V (OFF)");
+                            ESP_LOGW(TAG, "[RĘCZNY] Kanał %d (GPIO %d) ustawiony na twardo. Napięcie: %s", i+1, relays[i].pin, relays[i].manual_state == RELAY_ON ? "3.3V (ON)" : "0V (OFF)");
                         } else {
                             gpio_set_level(relays[i].pin, RELAY_OFF);
                             ESP_LOGI(TAG, "[AUTO] Kanał %d (GPIO %d) uzbrojony. Okno pracy: %d:00 - %d:00", i+1, relays[i].pin, relays[i].start_h, relays[i].end_h);
@@ -198,7 +219,7 @@ static esp_err_t post_config_handler(httpd_req_t *req) {
     return httpd_resp_send_chunk(req, NULL, 0);
 }
 
-// Główny wątek logiczny uwzględniający Active-Low i ramy czasowe
+// Główny wątek logiczny uwzględniający Active-High i ramy czasowe
 void watering_task(void *pvParameter) {
     while(1) {
         time_t now; struct tm timeinfo;
@@ -206,11 +227,9 @@ void watering_task(void *pvParameter) {
         uint32_t current_ticks = xTaskGetTickCount();
 
         if (timeinfo.tm_year > (2020 - 1900)) {
-            // ESP_LOGI(TAG, "[TICK] %02d:%02d:%02d | Silnik sprawdza %d kanałów...", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec, active_channels);
-            
             for (int i = 0; i < active_channels; i++) {
                 if (relays[i].mode == 0) {
-                    // Tryb ręczny omija logikę czasu
+                    // Tryb ręczny
                     gpio_set_level(relays[i].pin, relays[i].manual_state);
                     continue;
                 }
@@ -224,37 +243,37 @@ void watering_task(void *pvParameter) {
                 if (sh == eh) {
                     in_window = true; // Praca 24/7
                 } else if (sh < eh) {
-                    in_window = (h >= sh && h < eh); // np. 06:00 do 22:00
+                    in_window = (h >= sh && h < eh);
                 } else {
-                    in_window = (h >= sh || h < eh); // Praca przez noc, np. 22:00 do 06:00
+                    in_window = (h >= sh || h < eh);
                 }
 
                 if (!in_window) {
-                    // Jeśli poza oknem czasowym -> twarde odcięcie (HIGH)
+                    // Jeśli poza oknem czasowym -> twarde odcięcie (OFF -> 0V)
                     if (relays[i].is_active) {
                         relays[i].is_active = false;
                         gpio_set_level(relays[i].pin, RELAY_OFF);
-                        ESP_LOGE(TAG, "[HARMONOGRAM] Kanał %d -> Koniec okna czasowego. Zasilanie odcięte.", i+1);
+                        ESP_LOGE(TAG, "[HARMONOGRAM] Kanał %d -> Koniec okna czasowego. Zasilanie odcięte (0V).", i+1);
                     }
                     continue;
                 }
 
-                // Logika czasówek (Tylko w trakcie trwania okna operacyjnego)
+                // Logika czasówek w oknie operacyjnym
                 uint32_t elapsed_sec = (current_ticks - relays[i].last_toggle_tick) * portTICK_PERIOD_MS / 1000;
                 
-                if (relays[i].is_active) { // Aktualnie podlewa
+                if (relays[i].is_active) { // Aktualnie podlewa (ON)
                     if (elapsed_sec >= relays[i].time_on) {
                         relays[i].is_active = false;
                         relays[i].last_toggle_tick = current_ticks;
-                        gpio_set_level(relays[i].pin, RELAY_OFF); // Przekaż 3.3V (Wyłącz układ izolacji)
-                        ESP_LOGW(TAG, "[PRZEKAŹNIK] Kanał %d (GPIO %d) -> OFF (Cykl wyłączony)", i+1, relays[i].pin);
+                        gpio_set_level(relays[i].pin, RELAY_OFF); // Przekaż 0V (Wyłącz)
+                        ESP_LOGW(TAG, "[PRZEKAŹNIK] Kanał %d (GPIO %d) -> OFF", i+1, relays[i].pin);
                     }
-                } else { // Aktualnie czeka
+                } else { // Aktualnie czeka (OFF)
                     if (elapsed_sec >= relays[i].time_off) {
                         relays[i].is_active = true;
                         relays[i].last_toggle_tick = current_ticks;
-                        gpio_set_level(relays[i].pin, RELAY_ON);  // Przekaż 0V (Załącz układ izolacji)
-                        ESP_LOGE(TAG, "[PRZEKAŹNIK] Kanał %d (GPIO %d) -> ON  (Cykl aktywny)", i+1, relays[i].pin);
+                        gpio_set_level(relays[i].pin, RELAY_ON);  // Przekaż 3.3V (Włącz)
+                        ESP_LOGE(TAG, "[PRZEKAŹNIK] Kanał %d (GPIO %d) -> ON", i+1, relays[i].pin);
                     }
                 }
             }
@@ -266,7 +285,7 @@ void watering_task(void *pvParameter) {
 }
 
 void app_main(void) {
-    // Ustawienie polskiej strefy czasowej (Czas letni/zimowy automatycznie)
+    // Polska strefa czasowa (Automatyczne przejście zima/lato)
     setenv("TZ", "CET-1CEST,M3.5.0/2,M10.5.0/3", 1);
     tzset();
 
@@ -303,7 +322,7 @@ void app_main(void) {
 }
 EOF
 
-# 3. WARSTWA BACKENDU (FastAPI + Zintegrowany Flash)
+# 4. WARSTWA BACKENDU (FastAPI + Zintegrowany Flash)
 echo "[*] Inicjalizacja Demona z funkcją Auto-Flash..."
 cd "$BACKEND_DIR" || exit
 python3 -m venv venv
@@ -326,7 +345,6 @@ async def build_stream(websocket: WebSocket, target: str = "esp32s3"):
     project_path = os.path.abspath("../workspaces/hydroponika_system")
     idf_export = os.path.abspath(os.path.expanduser("~/esp/esp-idf/export.sh"))
     
-    # Dodany parametr 'flash' na końcu łańcucha budowania
     command = f"source {shlex.quote(idf_export)} && idf.py set-target {shlex.quote(target)} && stdbuf -oL idf.py build flash -p /dev/ttyACM0"
     
     try:
@@ -351,7 +369,7 @@ async def build_stream(websocket: WebSocket, target: str = "esp32s3"):
 EOF
 deactivate
 
-# 4. WARSTWA FRONTENDU IDE
+# 5. WARSTWA FRONTENDU IDE
 echo "[*] Generowanie interfejsu graficznego IDE..."
 cat << 'EOF' > "$FRONTEND_DIR/index.html"
 <!DOCTYPE html>
@@ -373,7 +391,7 @@ cat << 'EOF' > "$FRONTEND_DIR/index.html"
     <div class="controls">
         <select id="chipSelect"><option value="esp32s3" selected>Target: ESP32-S3</option></select>
         <button id="buildBtn" style="border-color:#ff003c; color:#ff003c;">[EXEC] KOMPILUJ I WGRAJ DO ESP32</button>
-        <span style="color:#888; font-size: 12px; margin-left: auto;">Terminal używaj tylko do: idf.py monitor</span>
+        <span style="color:#888; font-size: 12px; margin-left: auto;">Otwórz terminal w IDE by podglądać logi z układu.</span>
     </div>
     <div id="terminal"><span class="log-info">System gotowy. Upewnij się, że kabel USB jest podpięty (/dev/ttyACM0).<br></span></div>
     <script>
@@ -399,7 +417,7 @@ cat << 'EOF' > "$FRONTEND_DIR/index.html"
 </body></html>
 EOF
 
-# 5. SKRYPT URUCHOMIENIOWY
+# 6. SKRYPT URUCHOMIENIOWY
 cat << 'EOF' > "$BASE_DIR/run_ide.sh"
 #!/bin/bash
 cleanup() { kill $BACKEND_PID $FRONTEND_PID 2>/dev/null; exit 0; }
@@ -413,4 +431,5 @@ wait
 EOF
 chmod +x "$BASE_DIR/run_ide.sh"
 
-echo "[+] Gotowe! Uruchom komendą: ~/local-esp-ide/run_ide.sh"
+echo "[+] Instalacja zakończona! Uruchom IDE poleceniem:"
+echo "    ~/local-esp-ide/run_ide.sh"
